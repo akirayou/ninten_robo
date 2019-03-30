@@ -1,3 +1,6 @@
+// Use No OTA mode for ESP32 
+// About 1.5Mbyte memory is used for this sketch 
+
 #include <WiFi.h> 
 #include <ArduinoOSC.h>   //https://github.com/hideakitai/ArduinoOSC
 #include <ArtnetWifi.h> #// https://github.com/rstephan/ArtnetWifi/
@@ -6,19 +9,36 @@
 #include"ninten.h"
 #include <ESPmDNS.h>
 
+
+#include <BLEDevice.h>
+#include <BLEUtils.h>
+#include <BLEServer.h>
+#include <BLE2902.h>
+#define MIDI_SERVICE_UUID        "03b80e5a-ede8-4b33-a751-6ce34ec4c700"
+#define MIDI_CHARACTERISTIC_UUID "7772e5db-3868-4112-a1a9-f2669d106bf3"
+#define DEVIVE_NAME "NintenRobo MIDI"
+
 #include <Wire.h>
 #include "esp32_digital_led_lib.h"
 #define SDA_PIN 21
 #define SCL_PIN 22
 #define WS_PIN 33
+
+
+//Internal DMX data
+const uint16_t max_dmx_ch=15;
+volatile uint8_t dmx[max_dmx_ch] = {128,128,128,0}; //pan,tilt,grip,RGB*4
+
+/////////////////////////////////////
+//// Configuration by SPIFFS
+////////////////////////////////////
 //configuration on /wifi.txt /pid.txt
 char ssid[32];
 char wifipw[32];
-
 void readLine(File &fp,char * buf,size_t length,char *name){
   size_t ret=fp.readBytesUntil('\n', buf, length-1);
   buf[ret]=0;
-  Serial.print(name);Serial.print(":");Serial.println(name);
+  Serial.print(name);Serial.print(":");Serial.println(buf);
   
 }
 float readLineF(File &fp,char *name){
@@ -63,9 +83,9 @@ void load(){
   loadWiFi();
   loadPID();
 }
-
-const uint16_t max_dmx_ch=15;
-uint8_t dmx[] = {128,128,128,0}; //pan,tilt,grip,RGB*4
+/////////////////////////////////////
+//LED Control
+//////////////////////////////////////
 
 strand_t pStrand = {
   .rmtChannel = 0, .gpioNum = WS_PIN , .ledType = LED_WS2812B_V3, 
@@ -73,6 +93,9 @@ strand_t pStrand = {
   .pixels = nullptr, ._stateVars = nullptr};
 
 
+///////////////////////////////////////
+////  WiFi (OSC/Artnet) handler
+///////////////////////////////////////
 
 ArtnetWifi artnet;
 OscWiFi osc;
@@ -149,6 +172,98 @@ void oscSetup(){
   osc.subscribe("/0/dmx/*", onDmx_Osc);
   osc.subscribe("/pid/*", onPID_config);
 }
+//////////////////////////////////////////////
+// BLE MIDI handler
+/////////////////////////////////////////////
+
+BLEServer *pServer;
+BLEAdvertising *pAdvertising;
+BLECharacteristic *pCharacteristic;
+
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      Serial.println("BLE MIDI Connected.");
+    };
+    void onDisconnect(BLEServer* pServer) {
+      Serial.println("BLE MIDI Disconnect.");
+    }
+};
+
+class MyCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      std::string rxValue = pCharacteristic->getValue();
+      int pos = 0;
+      char midi[5];
+      if (rxValue.length() > 0) {
+        for (int rx = 0; rx < rxValue.length(); rx++)
+        {
+          midi[pos] = rxValue[rx];
+          pos++;
+          if(pos == 5)
+          {
+            pos=0;
+                  
+            bool silent=false;
+            byte ch=midi[3];
+            byte v=midi[4];
+            if(ch<max_dmx_ch){
+              silent=true;
+              dmx[ch]=v*2; 
+            }else if( 0x2b<=ch &&  ch<=0x48){ //MIDI-keyboard input
+              byte mode=ch-0x2b; // 29 mode can seted 
+              if(mode<25 && v!=0){
+                byte x=mode %5;
+                byte y= (mode-x)/5;
+                dmx[0]=x*40+27;
+                dmx[1]=y*40+27;
+                Serial.printf("X:%d Y:%d \n",dmx[0],dmx[1]);
+              }
+              if(25<=mode && mode <=27){ //RGB Key
+                for(int i=mode-25 + 3; i < max_dmx_ch ; i+=3){
+                  dmx[i]=(v==0)?0:255;
+                }
+              }
+              if(mode==28)for(int i=3;i<max_dmx_ch;i++)dmx[i]=0;
+              if(mode==29)for(int i=3;i<max_dmx_ch;i++)dmx[i]=255;
+            }
+            if(!silent)Serial.printf("MIDI: %02x %02x %02x\n",midi[2],midi[3],midi[4]);
+          }          
+        }
+      }
+    }
+};
+
+void midiSetup(){
+  BLEDevice::init(DEVIVE_NAME);
+  pServer = BLEDevice::createServer();
+  pServer->setCallbacks(new MyServerCallbacks());
+  BLEService *pService = pServer->createService(BLEUUID(MIDI_SERVICE_UUID));
+  pCharacteristic = pService->createCharacteristic(
+          BLEUUID(MIDI_CHARACTERISTIC_UUID),
+          BLECharacteristic::PROPERTY_READ   |
+          BLECharacteristic::PROPERTY_WRITE  |
+          BLECharacteristic::PROPERTY_NOTIFY |
+          BLECharacteristic::PROPERTY_WRITE_NR
+  );
+  pCharacteristic->setCallbacks(new MyCallbacks());
+  pCharacteristic->addDescriptor(new BLE2902());
+  pService->start();
+  
+  BLEAdvertisementData oAdvertisementData = BLEAdvertisementData();
+  oAdvertisementData.setFlags(0x04);
+  oAdvertisementData.setCompleteServices(BLEUUID(MIDI_SERVICE_UUID));
+  oAdvertisementData.setName(DEVIVE_NAME);
+  pAdvertising = pServer->getAdvertising();
+  pAdvertising->setAdvertisementData(oAdvertisementData);
+  pAdvertising->start();
+}
+
+
+
+/////////////////////////////
+/// Main
+////////////////////////////
+bool wifiEnabled=true;
 void setup() {
   Serial.begin(115200);
   load();
@@ -156,19 +271,30 @@ void setup() {
   nintenReset();
   Wire.begin(SDA_PIN,SCL_PIN);
   nintenReset();
-  
-  WiFi.begin(ssid,wifipw);
-  while (WiFi.status() != WL_CONNECTED) {
-    Serial.print(".");
-    delay(100);
+  midiSetup();
+  if(ssid[0]==0){
+    Serial.println("Wifi disenabled");
+    wifiEnabled=false;
   }
- Wire.begin(SDA_PIN,SCL_PIN);
+  if(wifiEnabled){
+    Serial.printf("WiFi start: %s:%s",ssid,wifipw);
+    WiFi.begin(ssid,wifipw);
+    for(int i=0;i<30;i++) { //wait WiFi connection for 3sec
+      if(WiFi.status() != WL_CONNECTED){
+        Serial.print("WiFi connected");
+        break;
+      }
+      Serial.print(".");
+      delay(100);
+    }
+  }
+  Wire.begin(SDA_PIN,SCL_PIN);
   nintenReset();
-  
-  if (!MDNS.begin("ROB")) {
-      Serial.println("Error setting up MDNS responder!");
+  if(wifiEnabled){
+    if (!MDNS.begin("ROB")) {
+        Serial.println("Error setting up MDNS responder!");
+    }
   }
-  MDNS.addService("osc", "udp", 9000);
 
   
   pinMode (WS_PIN, OUTPUT);
@@ -178,16 +304,18 @@ void setup() {
     while (true) {};
   }
   digitalLeds_resetPixels(&pStrand);
-  oscSetup();
   nintenSetup();
+  if(wifiEnabled){
+    MDNS.addService("osc", "udp", 9000);
+    oscSetup();
+  }
 }
 
-
-
-
 void loop() {
-  osc.parse();
-  artnet.read();
+  if(wifiEnabled){
+    osc.parse();
+    artnet.read();
+  }
   
   setAngle(dmx[0]/255.0f);
   setHeight(dmx[1]/255.0f);

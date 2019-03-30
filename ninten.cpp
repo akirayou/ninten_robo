@@ -25,12 +25,12 @@ static float angleMax=240;
 static float angle(){
   float r=as5048.angleR(U_DEG, true);
   if(300<r)r-=300;
-  return r/angleMax;
+  return (r-10)/(angleMax-20); //20 is safety margin
 }
 static float heightMin=18;
 static float heightMax=97;
 static float height(){
-  return (vl6180.readRangeSingleMillimeters()-heightMin)/(heightMax-heightMin);
+  return (vl6180.readRangeSingleMillimeters()-(heightMin+5))/(heightMax-heightMin-6);// 6 is safety margin
   
 }
 
