@@ -188,49 +188,50 @@ class MyServerCallbacks: public BLEServerCallbacks {
       Serial.println("BLE MIDI Disconnect.");
     }
 };
-
 class MyCallbacks: public BLECharacteristicCallbacks {
-    void onWrite(BLECharacteristic *pCharacteristic) {
-      std::string rxValue = pCharacteristic->getValue();
-      int pos = 0;
-      char midi[5];
-      if (rxValue.length() > 0) {
-        for (int rx = 0; rx < rxValue.length(); rx++)
-        {
-          midi[pos] = rxValue[rx];
-          pos++;
-          if(pos == 5)
-          {
-            pos=0;
-                  
-            bool silent=false;
-            byte ch=midi[3];
-            byte v=midi[4];
-            if(ch<max_dmx_ch){
-              silent=true;
-              dmx[ch]=v*2; 
-            }else if( 0x2b<=ch &&  ch<=0x48){ //MIDI-keyboard input
-              byte mode=ch-0x2b; // 29 mode can seted 
-              if(mode<25 && v!=0){
-                byte x=mode %5;
-                byte y= (mode-x)/5;
-                dmx[0]=x*40+27;
-                dmx[1]=y*40+27;
-                Serial.printf("X:%d Y:%d \n",dmx[0],dmx[1]);
-              }
-              if(25<=mode && mode <=27){ //RGB Key
-                for(int i=mode-25 + 3; i < max_dmx_ch ; i+=3){
-                  dmx[i]=(v==0)?0:255;
-                }
-              }
-              if(mode==28)for(int i=3;i<max_dmx_ch;i++)dmx[i]=0;
-              if(mode==29)for(int i=3;i<max_dmx_ch;i++)dmx[i]=255;
-            }
-            if(!silent)Serial.printf("MIDI: %02x %02x %02x\n",midi[2],midi[3],midi[4]);
-          }          
+  void onMidi(byte midi[3]){
+    bool silent=false;
+    byte ch=midi[1];
+    byte v=midi[2];
+    if(ch<max_dmx_ch){
+      silent=true;
+      dmx[ch]=v*2; 
+    }else if( 0x2b<=ch &&  ch<=0x48){ //MIDI-keyboard input
+      byte mode=ch-0x2b; // 29 mode can seted 
+      if(mode<25 && v!=0){
+        byte x=mode %5;
+        byte y= (mode-x)/5;
+        dmx[0]=x*40+27;
+        dmx[1]=y*40+27;
+        Serial.printf("X:%d Y:%d \n",dmx[0],dmx[1]);
+      }
+      if(25<=mode && mode <=27){ //RGB Key
+        for(int i=mode-25 + 3; i < max_dmx_ch ; i+=3){
+          dmx[i]=(v==0)?0:255;
         }
       }
+      if(mode==28)for(int i=3;i<max_dmx_ch;i++)dmx[i]=0;
+      if(mode==29)for(int i=3;i<max_dmx_ch;i++)dmx[i]=255;
     }
+    if(!silent)Serial.printf("MIDI: %02x %02x %02x\n",midi[0],midi[1],midi[2]);    
+  }
+  void onWrite(BLECharacteristic *pCharacteristic) {
+    std::string rxValue = pCharacteristic->getValue();
+    int pos = 0;
+    byte midi[3];
+    for (int rx = 0; rx < rxValue.length(); rx++)
+    {
+      byte v=rxValue[rx];
+      //Serial.printf("%02x:",v);
+      if(v&0x80){
+        pos=0;
+      }else{
+        pos++;
+      }
+      midi[pos]=v;
+      if(pos==2)onMidi(midi);          
+    }
+  }
 };
 
 void midiSetup(){
