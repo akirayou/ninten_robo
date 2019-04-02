@@ -228,6 +228,7 @@ class MyCallbacks: public BLECharacteristicCallbacks {
       }else{
         pos++;
       }
+      if(pos==3)pos=1;//For mac&QLC+  
       midi[pos]=v;
       if(pos==2)onMidi(midi);          
     }
